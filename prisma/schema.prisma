@@ -1,0 +1,523 @@
+// ---------------------------------------------------------------------------
+// Geneva Tax Declaration MVP — data model
+//
+// Design note (multi-canton extensibility): every canton-specific concept
+// (TaxCase, TaxSection, field codes) carries a `canton` discriminator instead
+// of being hardcoded to Geneva. Adding a new canton means adding rows to the
+// tax-section/field-mapping configuration (see src/lib/taxSections) and a new
+// `Canton` enum value — no schema migration for the core workflow tables.
+//
+// Privacy-by-design: ExtractedField.value / normalizedValue and
+// UploadedDocument.storageKey point at encrypted content (see src/lib/crypto
+// and src/lib/storage). AuditLog never stores raw tax values — only entity
+// references and non-sensitive metadata (see src/lib/audit/log.ts).
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum Canton {
+  GE // Geneva — implemented. Placeholder for future cantons (VD, ZH, ...).
+}
+
+/// Tax case lifecycle. Enforced by the workflow state machine in
+/// src/lib/validation/engine.ts — never set directly from the UI layer.
+enum TaxCaseStatus {
+  created
+  documents_uploaded
+  extraction_in_progress
+  extraction_completed
+  user_review_in_progress
+  validation_blocked
+  ready_for_generation
+  generated
+  finalized
+  deleted
+}
+
+enum DocumentClassification {
+  PreviousTaxDeclaration
+  CurrentBlankDeclaration
+  SalaryCertificate
+  BankStatement
+  SecuritiesStatement
+  ThirdPillar
+  PensionFund
+  HealthInsurance
+  MedicalExpense
+  Childcare
+  Mortgage
+  RealEstate
+  Donation
+  Debt
+  Insurance
+  SelfEmployment
+  Vehicle
+  Other
+}
+
+enum DocumentStatus {
+  UPLOADED
+  SCAN_REJECTED
+  TEXT_EXTRACTING
+  OCR_PROCESSING
+  CLASSIFIED
+  EXTRACTING
+  EXTRACTED
+  EXTRACTION_FAILED
+}
+
+enum ClassificationSource {
+  AI
+  USER
+}
+
+enum TextExtractionMethod {
+  NATIVE
+  OCR
+  MIXED
+  NONE
+}
+
+enum ExtractionMethod {
+  LLM
+  LLM_OCR
+  REGEX
+  MANUAL
+}
+
+/// Shared confirmation-status vocabulary for ExtractedField and
+/// TaxFieldMapping, per product spec. This is the single source of truth
+/// for "has the user confirmed it?".
+enum ItemStatus {
+  extracted
+  needs_review
+  confirmed
+  edited_confirmed
+  rejected
+  not_applicable
+  missing
+  unresolved
+}
+
+enum ConfirmationAction {
+  CONFIRM
+  EDIT_CONFIRM
+  REJECT
+  NOT_APPLICABLE
+  MARK_MISSING
+  REQUEST_HELP
+}
+
+enum PDFType {
+  COMPLETED_DECLARATION
+  REVIEW_SUMMARY
+  SUPPORTING_DOCS_INDEX
+  ASSUMPTIONS_WARNINGS
+  MISSING_ITEMS_CHECKLIST
+  AUDIT_TRAIL
+  FINAL_PACKAGE_ZIP
+}
+
+enum PDFFillMethod {
+  ACROFORM
+  OVERLAY
+  MANUAL_REPORT
+  NOT_APPLICABLE
+}
+
+enum AuditAction {
+  USER_REGISTERED
+  USER_LOGIN
+  USER_LOGIN_FAILED
+  USER_LOGOUT
+  CASE_CREATED
+  CASE_DELETED
+  DOCUMENT_UPLOADED
+  DOCUMENT_DELETED
+  DOCUMENT_SCAN_BLOCKED
+  DOCUMENT_CLASSIFIED
+  DOCUMENT_EXTRACTED
+  FIELD_CONFIRMED
+  FIELD_EDITED_CONFIRMED
+  FIELD_REJECTED
+  FIELD_MARKED_NOT_APPLICABLE
+  FIELD_MARKED_MISSING
+  HELP_REQUESTED
+  VALIDATION_RUN
+  FINAL_DECLARATION_ACCEPTED
+  PDF_GENERATED
+  PACKAGE_DOWNLOADED
+  ADMIN_CASE_VIEWED
+}
+
+enum MissingDocumentReason {
+  NOT_UPLOADED
+  LOW_CONFIDENCE
+  PRESENT_LAST_YEAR_ABSENT_THIS_YEAR
+}
+
+enum MissingDocumentStatus {
+  OPEN
+  CONFIRMED_MISSING
+  MARKED_NOT_APPLICABLE
+  RESOLVED
+}
+
+enum ValidationIssueType {
+  MISSING_REQUIRED_FIELD
+  PREVIOUS_YEAR_INCONSISTENCY
+  UNUSUAL_CHANGE
+  DUPLICATE_DOCUMENT
+  DUPLICATE_DEDUCTION
+  CURRENCY_INCONSISTENCY
+  IMPOSSIBLE_VALUE
+  UNSUPPORTED_DOCUMENT_TYPE
+  LOW_CONFIDENCE_EXTRACTION
+  UNCONFIRMED_VALUE
+}
+
+enum ValidationSeverity {
+  INFO
+  WARNING
+  BLOCKING
+}
+
+enum ValidationIssueStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+enum TaxSectionKey {
+  INCOME_EMPLOYMENT
+  INCOME_SELF_EMPLOYMENT
+  INCOME_SECURITIES
+  REAL_ESTATE
+  BANK_ACCOUNTS
+  THIRD_PILLAR
+  PENSION_FUND
+  DEDUCTIONS_PROFESSIONAL_EXPENSES
+  DEDUCTIONS_INSURANCE_PREMIUMS
+  DEDUCTIONS_MEDICAL_EXPENSES
+  DEDUCTIONS_CHILDCARE
+  DEDUCTIONS_DONATIONS
+  DEDUCTIONS_MORTGAGE_INTEREST
+  DEBTS
+  DEPENDENTS
+  VEHICLES
+  OTHER
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  role         Role     @default(USER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  taxCases      TaxCase[]
+  auditLogs     AuditLog[]
+  confirmations UserConfirmation[]
+  generatedPDFs GeneratedPDF[]
+
+  @@map("users")
+}
+
+model TaxCase {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  canton    Canton        @default(GE)
+  taxYear   Int
+  status    TaxCaseStatus @default(created)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  deletedAt DateTime?
+
+  documents          UploadedDocument[]
+  extractedFields    ExtractedField[]
+  fieldMappings      TaxFieldMapping[]
+  confirmations      UserConfirmation[]
+  generatedPDFs      GeneratedPDF[]
+  missingDocuments   MissingDocument[]
+  assumptions        Assumption[]
+  validationIssues   ValidationIssue[]
+  auditLogs          AuditLog[]
+
+  @@index([userId])
+  @@map("tax_cases")
+}
+
+model UploadedDocument {
+  id             String                @id @default(cuid())
+  taxCaseId      String
+  taxCase        TaxCase               @relation(fields: [taxCaseId], references: [id], onDelete: Cascade)
+  uploadedByUserId String
+  originalFilename String
+  mimeType       String
+  sizeBytes      Int
+  storageKey     String                // opaque pointer into the encrypted storage backend
+  checksumSha256 String
+  status         DocumentStatus        @default(UPLOADED)
+  classification DocumentClassification?
+  classificationConfidence Float?
+  classificationSource     ClassificationSource?
+  textExtractionMethod     TextExtractionMethod @default(NONE)
+  pageCount      Int?
+  malwareScanClean Boolean?
+  malwareScanProvider String?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  pages           DocumentPage[]
+  extractedFields ExtractedField[]
+
+  @@index([taxCaseId])
+  @@map("uploaded_documents")
+}
+
+model DocumentPage {
+  id            String   @id @default(cuid())
+  documentId    String
+  document      UploadedDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  pageNumber    Int
+  rawText       String?  @db.Text // encrypted ciphertext, see src/lib/crypto
+  ocrApplied    Boolean  @default(false)
+  ocrConfidence Float?
+  createdAt     DateTime @default(now())
+
+  @@unique([documentId, pageNumber])
+  @@map("document_pages")
+}
+
+/// A single extracted, atomic fact from a document, always traceable back to
+/// its exact source (document + page + evidence excerpt) and always carrying
+/// an explicit confirmation status — never silently trusted.
+model ExtractedField {
+  id             String   @id @default(cuid())
+  taxCaseId      String
+  taxCase        TaxCase  @relation(fields: [taxCaseId], references: [id], onDelete: Cascade)
+  documentId     String
+  document       UploadedDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  fieldKey              String // stable key within the document type schema, e.g. "salary.grossIncome"
+  label                 String
+  value                 String @db.Text // encrypted ciphertext
+  normalizedValue       String? @db.Text // encrypted ciphertext (machine-comparable form)
+  currency              String?
+  period                String? // e.g. "2025" or "2025-01/2025-12"
+  confidence            Float
+  sourcePageNumber      Int?
+  evidenceExcerpt       String? @db.Text // encrypted ciphertext
+  extractionMethod      ExtractionMethod
+  possibleTaxSectionKey TaxSectionKey?
+  needsUserConfirmation Boolean @default(true)
+  notes                 String?
+
+  status    ItemStatus @default(extracted)
+  editedValue String?  @db.Text // encrypted ciphertext, set when user edits before confirming
+  rejectionReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  fieldMappings   TaxFieldMapping[]
+  confirmations   UserConfirmation[]
+  assumptions     Assumption[]
+  validationIssues ValidationIssue[]
+
+  @@index([taxCaseId])
+  @@index([documentId])
+  @@map("extracted_fields")
+}
+
+/// Canton-specific declaration section definition (seeded reference data,
+/// not user data). Kept as a table — rather than a hardcoded enum-only list —
+/// so new cantons/years can be configured without a schema change.
+model TaxSection {
+  id          String        @id @default(cuid())
+  canton      Canton
+  taxYear     Int
+  key         TaxSectionKey
+  label       String
+  description String?
+  required    Boolean       @default(false)
+  sortOrder   Int           @default(0)
+
+  fieldMappings TaxFieldMapping[]
+
+  @@unique([canton, taxYear, key])
+  @@map("tax_sections")
+}
+
+/// Maps a (confirmed or pending) value onto a specific field of the current
+/// year's declaration form, independent of whether it originated from
+/// extraction or fully manual entry.
+model TaxFieldMapping {
+  id         String   @id @default(cuid())
+  taxCaseId  String
+  taxCase    TaxCase  @relation(fields: [taxCaseId], references: [id], onDelete: Cascade)
+  taxSectionId String
+  taxSection TaxSection @relation(fields: [taxSectionId], references: [id])
+  extractedFieldId String?
+  extractedField   ExtractedField? @relation(fields: [extractedFieldId], references: [id], onDelete: SetNull)
+
+  declarationFieldCode  String // canton form field code, e.g. Geneva "11.30"
+  declarationFieldLabel String
+  mappedValue           String? @db.Text // encrypted ciphertext
+  mappedCurrency        String?
+  acroFormFieldName     String? // AcroForm field name if the target PDF is fillable
+
+  status    ItemStatus @default(needs_review)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  confirmations    UserConfirmation[]
+  assumptions      Assumption[]
+  validationIssues ValidationIssue[]
+
+  @@index([taxCaseId])
+  @@map("tax_field_mappings")
+}
+
+/// Immutable audit trail of every user decision on an item. Never mutated or
+/// deleted except as part of a full case deletion; this is what
+/// audit_trail.pdf is generated from.
+model UserConfirmation {
+  id         String   @id @default(cuid())
+  taxCaseId  String
+  taxCase    TaxCase  @relation(fields: [taxCaseId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+
+  extractedFieldId  String?
+  extractedField    ExtractedField? @relation(fields: [extractedFieldId], references: [id], onDelete: SetNull)
+  taxFieldMappingId String?
+  taxFieldMapping   TaxFieldMapping? @relation(fields: [taxFieldMappingId], references: [id], onDelete: SetNull)
+
+  action        ConfirmationAction
+  previousValue String? @db.Text // encrypted ciphertext
+  newValue      String? @db.Text // encrypted ciphertext
+  note          String?
+  createdAt     DateTime @default(now())
+
+  @@index([taxCaseId])
+  @@map("user_confirmations")
+}
+
+model GeneratedPDF {
+  id             String   @id @default(cuid())
+  taxCaseId      String
+  taxCase        TaxCase  @relation(fields: [taxCaseId], references: [id], onDelete: Cascade)
+  type           PDFType
+  storageKey     String
+  sizeBytes      Int
+  checksumSha256 String
+  fillMethod     PDFFillMethod @default(NOT_APPLICABLE)
+  generatedByUserId String
+  generatedByUser   User @relation(fields: [generatedByUserId], references: [id])
+  createdAt      DateTime @default(now())
+
+  @@index([taxCaseId])
+  @@map("generated_pdfs")
+}
+
+/// Compliance audit log. Deliberately denormalized (snapshot IDs as plain
+/// strings) so entries survive case/document deletion; `metadata` must never
+/// contain raw tax, salary, bank, health, or personal-identifier values —
+/// enforced by the helper in src/lib/audit/log.ts, not by this schema alone.
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  taxCaseId  String?
+  taxCase    TaxCase? @relation(fields: [taxCaseId], references: [id], onDelete: SetNull)
+  taxCaseIdSnapshot String?
+  action     AuditAction
+  entityType String?
+  entityId   String?
+  metadata   Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([taxCaseId])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+model MissingDocument {
+  id             String   @id @default(cuid())
+  taxCaseId      String
+  taxCase        TaxCase  @relation(fields: [taxCaseId], references: [id], onDelete: Cascade)
+  classification DocumentClassification
+  reason         MissingDocumentReason
+  status         MissingDocumentStatus @default(OPEN)
+  note           String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([taxCaseId])
+  @@map("missing_documents")
+}
+
+/// Every place the system fills a gap or infers something instead of relying
+/// on a confirmed user value. Always surfaced in assumptions_and_warnings.pdf.
+model Assumption {
+  id                String   @id @default(cuid())
+  taxCaseId         String
+  taxCase           TaxCase  @relation(fields: [taxCaseId], references: [id], onDelete: Cascade)
+  extractedFieldId  String?
+  extractedField    ExtractedField? @relation(fields: [extractedFieldId], references: [id], onDelete: SetNull)
+  taxFieldMappingId String?
+  taxFieldMapping   TaxFieldMapping? @relation(fields: [taxFieldMappingId], references: [id], onDelete: SetNull)
+  description       String
+  rationale         String?
+  createdAt         DateTime @default(now())
+
+  @@index([taxCaseId])
+  @@map("assumptions")
+}
+
+model ValidationIssue {
+  id                String   @id @default(cuid())
+  taxCaseId         String
+  taxCase           TaxCase  @relation(fields: [taxCaseId], references: [id], onDelete: Cascade)
+  type              ValidationIssueType
+  severity          ValidationSeverity
+  status            ValidationIssueStatus @default(OPEN)
+  relatedExtractedFieldId  String?
+  relatedExtractedField    ExtractedField? @relation(fields: [relatedExtractedFieldId], references: [id], onDelete: SetNull)
+  relatedTaxFieldMappingId String?
+  relatedTaxFieldMapping   TaxFieldMapping? @relation(fields: [relatedTaxFieldMappingId], references: [id], onDelete: SetNull)
+  message           String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([taxCaseId])
+  @@map("validation_issues")
+}
