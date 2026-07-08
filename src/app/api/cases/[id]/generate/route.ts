@@ -6,6 +6,9 @@ import { checkGenerationGate } from "@/lib/validation/engine";
 import { generateFinalPackage } from "@/lib/pdf/package";
 import { getJobQueue } from "@/lib/jobs/queue";
 
+// PDF generation (multiple reports + zipping) can take a while; see documents/route.ts.
+export const maxDuration = 60;
+
 export const POST = withErrorHandling(async (_req: Request, { params }: { params: { id: string } }) => {
   const user = await requireUser();
   const taxCase = await requireCaseOwnership(params.id, user);

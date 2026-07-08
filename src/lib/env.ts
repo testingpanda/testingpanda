@@ -77,6 +77,13 @@ export function getEnv(): Env {
       throw new Error(`STORAGE_DRIVER=s3 requires: ${missing.join(", ")}`);
     }
   }
+  if (parsed.data.NODE_ENV === "production" && parsed.data.STORAGE_DRIVER === "local") {
+    // Serverless platforms (Vercel, etc.) have an ephemeral/read-only filesystem outside
+    // of /tmp — "local" storage would silently lose every uploaded tax document.
+    throw new Error(
+      "STORAGE_DRIVER=local is not allowed when NODE_ENV=production. Set STORAGE_DRIVER=s3 and configure an S3-compatible bucket."
+    );
+  }
   if (parsed.data.LLM_PROVIDER === "openai" && !parsed.data.OPENAI_API_KEY) {
     throw new Error("LLM_PROVIDER=openai requires OPENAI_API_KEY");
   }

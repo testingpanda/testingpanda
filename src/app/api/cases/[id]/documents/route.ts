@@ -14,6 +14,11 @@ import { runExtractionPipeline } from "@/lib/extraction/pipeline";
 import { recomputeCaseStatus } from "@/lib/validation/engine";
 import { recordAuditLog } from "@/lib/audit/log";
 
+// Upload runs the extraction pipeline synchronously (parse/OCR/classify/extract),
+// which can exceed Vercel's default serverless function timeout. Requires a Pro
+// plan or higher for durations above 10s — see README "Deploying to Vercel".
+export const maxDuration = 60;
+
 const classificationSchema = z
   .enum([
     "PreviousTaxDeclaration",

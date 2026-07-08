@@ -32,6 +32,54 @@ For every important value, the system always answers three questions:
 - **PDF pipeline**: `pdf-parse` (text extraction), `pdf-lib` (AcroForm filling, overlay, generated reports), `tesseract.js` (optional real OCR) with a safe stub default
 - Vitest for tests, Docker Compose for local dev
 
+## Deploying to Vercel
+
+This app deploys like any Next.js app — **connect the GitHub repo in the
+Vercel dashboard**, you don't need to paste code anywhere. Vercel builds and
+deploys directly from the branch. Two infrastructure pieces aren't provided
+by Vercel itself and you need to provision them first:
+
+1. **A PostgreSQL database** — Vercel Postgres, [Neon](https://neon.tech), or [Supabase](https://supabase.com) all work. Copy the connection string.
+2. **An S3-compatible bucket** — AWS S3, Cloudflare R2, or Backblaze B2. Vercel's serverless filesystem is ephemeral/read-only, so `STORAGE_DRIVER=local` is refused at boot when `NODE_ENV=production` (see `src/lib/env.ts`) — you must use `s3`.
+
+### Steps
+
+1. Push this repo to GitHub (already done if you're reading this from the pushed branch) and import it in [vercel.com/new](https://vercel.com/new).
+2. In **Project Settings → Build & Development Settings**, override the Build Command to:
+   ```
+   npm run vercel-build
+   ```
+   (this runs `prisma generate && prisma migrate deploy && next build`, applying migrations on every deploy — fine for a single-environment MVP deployment).
+3. In **Project Settings → Environment Variables**, add:
+
+   | Variable | Value |
+   |---|---|
+   | `DATABASE_URL` | your Postgres connection string |
+   | `APP_ENCRYPTION_KEY` | `openssl rand -base64 32` |
+   | `SESSION_SECRET` | `openssl rand -base64 32` |
+   | `NODE_ENV` | `production` |
+   | `APP_URL` | your Vercel deployment URL, e.g. `https://your-app.vercel.app` |
+   | `STORAGE_DRIVER` | `s3` |
+   | `STORAGE_S3_BUCKET` | your bucket name |
+   | `STORAGE_S3_REGION` | e.g. `us-east-1` (or your R2 region) |
+   | `STORAGE_S3_ENDPOINT` | only needed for R2/B2/non-AWS — your provider's S3 endpoint URL |
+   | `STORAGE_S3_ACCESS_KEY_ID` / `STORAGE_S3_SECRET_ACCESS_KEY` | your bucket credentials |
+   | `STORAGE_S3_FORCE_PATH_STYLE` | `true` for R2/B2, `false` for AWS S3 |
+   | `LLM_PROVIDER` | `mock` to start (free, no key needed), or `openai`/`anthropic` with the matching API key var |
+   | `OCR_PROVIDER` | `stub` (safe default) |
+   | `MALWARE_SCAN_PROVIDER` | `stub` (safe default — see README "Production hardening TODOs" for wiring real ClamAV) |
+   | `MAX_UPLOAD_SIZE_MB` | keep ≤ 4 on Vercel's Hobby plan — see note below |
+   | `SEED_DEMO_MODE` | `false` (don't auto-seed a demo account in production) |
+
+4. Deploy. On first deploy, `vercel-build` applies the Prisma migration to your database automatically.
+5. (Optional) Run `npm run seed` locally against the production `DATABASE_URL`/storage config if you want a demo account — not recommended for a real production database.
+
+### Vercel-specific limits to know about
+
+- **Request body size**: Vercel serverless functions cap request bodies (4.5 MB on Hobby, higher on Pro). The document upload endpoint (`/api/cases/[id]/documents`) will reject larger files with a platform-level error before your app even sees them — keep `MAX_UPLOAD_SIZE_MB` under your plan's limit, or upgrade to Pro for larger uploads.
+- **Function duration**: extraction and PDF generation run synchronously in the request. Both routes now set `export const maxDuration = 60` — this requires a Pro plan or higher; Hobby is capped at 10s and large/scanned documents may time out. If that happens in practice, move those two routes to a background job (the `src/lib/jobs/queue.ts` interface is already shaped for swapping in BullMQ + Redis, or a Vercel Queue/Inngest-style approach).
+- **Cold starts**: the mock LLM/OCR providers are fast; real OpenAI/Anthropic/tesseract calls add latency on top of the above.
+
 ## Quick start (Docker)
 
 ```bash

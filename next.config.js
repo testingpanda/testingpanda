@@ -4,7 +4,14 @@ const nextConfig = {
   // Never leak file contents through static optimization; every page that
   // touches tax data is rendered dynamically and server-side.
   experimental: {
-    serverComponentsExternalPackages: ["pdf-parse", "pdf-lib", "archiver", "@aws-sdk/client-s3"],
+    serverComponentsExternalPackages: [
+      "pdf-parse",
+      "pdf-lib",
+      "archiver",
+      "@aws-sdk/client-s3",
+      "@aws-sdk/s3-request-presigner",
+      "tesseract.js",
+    ],
   },
   async headers() {
     return [
